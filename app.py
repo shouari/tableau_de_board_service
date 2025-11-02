@@ -11,8 +11,8 @@ import difflib
 
 
 st.set_page_config(page_title="SAV KPI Dashboard", page_icon="📊", layout="wide")
-st.title("📊 Service Calls — KPI Dashboard (GPT + Taxonomie FR)")
-st.caption("GPT-4 + règles locales (TAXO_FR + KEYWORDS_FR) • KPI • Graphiques • Export CSV/Excel")
+st.title("📊 Service Calls — KPI Dashboard")
+st.caption("Analyse et classification des tickets SAV, avec OpenAI GPT-4o")
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
 client = openai.OpenAI(api_key=openai_api_key)
@@ -178,7 +178,7 @@ def classify_service_call_gpt(issue_text: str) -> dict:
     # b) Appel GPT en JSON strict + retry si nécessaire
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             temperature=0.0,
             response_format={"type": "json_object"},
             messages=[
@@ -260,7 +260,7 @@ def classify_all(df: pd.DataFrame) -> pd.DataFrame:
 # -----------------------
 with st.sidebar:
     st.header("📥 Données")
-    uploaded = st.file_uploader("Uploader data.json", type=["json"])
+    uploaded = st.file_uploader("Téléverser les données en format JSON", type=["json"])
     show_heatmap = st.toggle("Heatmap Type × Catégorie", True)
     want_excel = st.toggle("Export Excel", False)
 
