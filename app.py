@@ -14,8 +14,7 @@ st.set_page_config(page_title="SAV KPI Dashboard", page_icon="📊", layout="wid
 st.title("📊 Service Calls — KPI Dashboard (GPT + Taxonomie FR)")
 st.caption("GPT-4 + règles locales (TAXO_FR + KEYWORDS_FR) • KPI • Graphiques • Export CSV/Excel")
 
-openai_api_key = "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"
-
+openai_api_key = os.environ["OPENAI_API_KEY"]
 client = openai.OpenAI(api_key=openai_api_key)
 
 # -----------------------
