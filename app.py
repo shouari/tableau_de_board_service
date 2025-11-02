@@ -14,7 +14,7 @@ st.set_page_config(page_title="SAV KPI Dashboard", page_icon="📊", layout="wid
 st.title("📊 Service Calls — KPI Dashboard")
 st.caption("Analyse et classification des tickets SAV, avec OpenAI GPT-4o")
 
-openai_api_key = os.environ.get("OPENAI_API_KEY")
+openai_api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 client = openai.OpenAI(api_key=openai_api_key)
 
 # -----------------------
