@@ -192,7 +192,7 @@ def classify_service_call_gpt(issue_text: str) -> dict:
     except Exception:
         # Retry simple
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             temperature=0.0,
             response_format={"type": "json_object"},
             messages=[
