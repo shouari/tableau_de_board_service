@@ -265,7 +265,7 @@ with st.sidebar:
     show_heatmap = st.toggle("Heatmap Type × Catégorie", True)
 
 if not uploaded:
-    st.info("➡️ Charge un fichier `data.json` pour commencer.")
+    st.info("➡️ Charge un fichier json récupéré depuis le API de D-Tools.")
     st.stop()
 
 df_raw = json_to_df(uploaded)
@@ -273,7 +273,7 @@ if df_raw.empty:
     st.warning("Aucune donnée trouvée.")
     st.stop()
 
-st.info("⏳ Classification GPT + règles locales en cours...")
+st.info("⏳ Classification et génération du tableau de bord en cours...")
 df_cls = classify_all(df_raw)
 df = pd.concat([df_raw, df_cls], axis=1)
 
@@ -281,7 +281,9 @@ df = pd.concat([df_raw, df_cls], axis=1)
 # KPI & Graphiques
 # -----------------------
 total_tickets = len(df)
-avg_cost = float(df["price"].mean()) if total_tickets else 0.0
+completed_df = df[df["stateName"].str.lower() == "completed"]
+avg_cost = float(completed_df["price"].mean()) if not completed_df.empty else 0.0
+
 hors_ligne_pct = 100 * df["type_probleme"].eq("Hors ligne").mean() if total_tickets else 0.0
 control4_pct = 100 * df["systeme"].eq("Control4").mean() if total_tickets else 0.0
 unifi_pct = 100 * df["systeme"].eq("Unifi").mean() if total_tickets else 0.0
@@ -289,9 +291,9 @@ unifi_pct = 100 * df["systeme"].eq("Unifi").mean() if total_tickets else 0.0
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Tickets totaux", total_tickets)
 c2.metric("Hors ligne", f"{hors_ligne_pct:.1f}%")
-c3.metric("Control4 (explicite ou inféré)", f"{control4_pct:.1f}%")
-c4.metric("Unifi (explicite ou inféré)", f"{unifi_pct:.1f}%")
-c5.metric("Coût moyen", f"{avg_cost:,.2f} $")
+c3.metric("Control4 (explicite ou déduit)", f"{control4_pct:.1f}%")
+c4.metric("Unifi (explicite ou déduit)", f"{unifi_pct:.1f}%")
+c5.metric("Coût moyen des SC complétés", f"{avg_cost:,.2f} $")
 
 st.divider()
 
@@ -340,13 +342,3 @@ st.dataframe(df[cols], use_container_width=True, height=480)
 csv = df[cols].to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Télécharger CSV", csv, file_name="rapport_kpi.csv", mime="text/csv")
 
-if want_excel:
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        df[cols].to_excel(writer, index=False)
-    st.download_button(
-        "⬇️ Télécharger Excel",
-        out.getvalue(),
-        file_name="rapport_kpi.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
