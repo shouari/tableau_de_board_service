@@ -263,7 +263,6 @@ with st.sidebar:
     st.header("📥 Données")
     uploaded = st.file_uploader("Téléverser les données en format JSON", type=["json"])
     show_heatmap = st.toggle("Heatmap Type × Catégorie", True)
-    want_excel = st.toggle("Export Excel", False)
 
 if not uploaded:
     st.info("➡️ Charge un fichier `data.json` pour commencer.")
