@@ -2,12 +2,15 @@ import os
 import io
 import json
 import re
+import difflib
+import hashlib
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 from bs4 import BeautifulSoup
 import openai
-import difflib
 
 
 st.set_page_config(page_title="SAV KPI Dashboard", page_icon="📊", layout="wide")
@@ -15,8 +18,43 @@ st.title("📊 Service Calls — KPI Dashboard")
 st.caption("Analyse et classification des tickets SAV, avec OpenAI GPT-4o")
 
 openai_api_key = st.secrets.get("OPENAI_API_KEY")
-
 client = openai.OpenAI(api_key=openai_api_key)
+
+# -----------------------
+# 📦 Cache persistant (Streamlit Cloud + fichier)
+# -----------------------
+CACHE_PATH = Path("classification_cache.json")
+
+def _load_cache() -> dict:
+    # 1) session_state (le plus rapide pour les re-runs)
+    if "CLASS_CACHE" in st.session_state and isinstance(st.session_state.CLASS_CACHE, dict):
+        return st.session_state.CLASS_CACHE
+    # 2) fichier persistant (sur l'instance Streamlit Cloud tant que l'app ne redémarre pas)
+    if CACHE_PATH.exists():
+        try:
+            with CACHE_PATH.open("r", encoding="utf-8") as f:
+                st.session_state.CLASS_CACHE = json.load(f)
+                return st.session_state.CLASS_CACHE
+        except Exception:
+            pass
+    st.session_state.CLASS_CACHE = {}
+    return st.session_state.CLASS_CACHE
+
+def _save_cache(cache: dict) -> None:
+    st.session_state.CLASS_CACHE = cache
+    try:
+        with CACHE_PATH.open("w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception:
+        # Si l’écriture échoue (read-only), on garde au moins session_state
+        pass
+
+CLASS_CACHE = _load_cache()
+
+def _cache_key_for_text(text: str) -> str:
+    # clé stable, indépendante de la longueur : SHA256 du texte nettoyé
+    norm = (text or "").strip()
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
 # -----------------------
 # Taxonomie et règles locales
@@ -83,7 +121,7 @@ def json_to_df(file_like):
     data = json.load(file_like)
     rows = data.get("serviceCalls", data) if isinstance(data, dict) else data
     df = pd.DataFrame(rows)
-    for col in ["number", "client", "issueReported", "price", "createdOn"]:
+    for col in ["number", "client", "issueReported", "price", "createdOn", "stateName"]:
         if col not in df.columns:
             df[col] = None
     df["issue_text"] = df["issueReported"].apply(clean_html)
@@ -108,7 +146,6 @@ def _snap(value: str, allowed: list[str]) -> str:
     if cand:
         idx = [a.lower() for a in allowed].index(cand[0])
         return allowed[idx]
-    # par défaut: dernier élément (ici on vise "Non spécifié" quand c’est la liste système)
     return "Non spécifié" if "Non spécifié" in allowed else allowed[-1]
 
 # 2) détection explicite de marque
@@ -142,7 +179,7 @@ def _keyword_score(text: str, table: dict[str, dict[str, str]]) -> dict[str, dic
                 scores[field][v] = scores[field].get(v, 0) + 1
     return scores
 
-# 4) prompt JSON strict (few-shot succinct)
+# 4) prompt JSON strict
 def _prompt_json(text: str) -> str:
     return f"""
 Tu es un classificateur SAV. Réponds UNIQUEMENT par un JSON valide, sans texte autour.
@@ -155,28 +192,32 @@ Contraintes:
 - "confiance_systeme" ∈ [0.0, 1.0]
 - "justification_systeme": phrase courte (≤12 mots)
 
-Exemples:
-Texte: "Le wifi tombe souvent, SSID introuvable"
-{{"type_probleme":"Hors ligne","categorie":"Réseau","systeme":"Non spécifié","systeme_suggere":"Unifi","confiance_systeme":0.7,"justification_systeme":"indices réseau (wifi/SSID)"}}
-
-Texte: "Pas de son sur Sonos dans la cuisine"
-{{"type_probleme":"Pas de son","categorie":"Audio","systeme":"Sonos","systeme_suggere":null,"confiance_systeme":0.95,"justification_systeme":"marque explicite"}}
-
-Texte: "Télécommande C4 ne contrôle plus la TV"
-{{"type_probleme":"Pas de contrôle","categorie":"Système de contrôle","systeme":"Control4","systeme_suggere":null,"confiance_systeme":0.9,"justification_systeme":"C4 explicite"}}
-
 Maintenant, classe ce texte:
 \"\"\"{text}\"\"\"
 """.strip()
 
 def classify_service_call_gpt(issue_text: str) -> dict:
-    text = issue_text or ""
+    text = (issue_text or "").strip()
+    if not text:
+        return {
+            "type_probleme": "Autre",
+            "categorie": "Autres",
+            "systeme": "Non spécifié",
+            "systeme_suggere": None,
+            "confiance_systeme": 0.0,
+            "justification_systeme": "",
+        }
+
+    # 🔒 Vérifie le cache
+    key = _cache_key_for_text(text)
+    if key in CLASS_CACHE:
+        return CLASS_CACHE[key]
 
     # a) Marque explicite
     explicit = _explicit_brand(text)
     explicit_system = explicit if explicit in TAXO_FR["systeme"] else None
 
-    # b) Appel GPT en JSON strict + retry si nécessaire
+    # b) Appel GPT (JSON strict) + retry simple
     try:
         resp = client.chat.completions.create(
             model="gpt-4o",
@@ -190,7 +231,6 @@ def classify_service_call_gpt(issue_text: str) -> dict:
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
     except Exception:
-        # Retry simple
         resp = client.chat.completions.create(
             model="gpt-4o",
             temperature=0.0,
@@ -238,7 +278,7 @@ def classify_service_call_gpt(issue_text: str) -> dict:
             if not just:
                 just = "mot-clé système détecté"
 
-    return {
+    result = {
         "type_probleme": tp,
         "categorie": cat,
         "systeme": sys_off,
@@ -246,6 +286,12 @@ def classify_service_call_gpt(issue_text: str) -> dict:
         "confiance_systeme": round(float(conf), 2),
         "justification_systeme": just,
     }
+
+    # 📝 Sauvegarde dans le cache (session + fichier)
+    CLASS_CACHE[key] = result
+    _save_cache(CLASS_CACHE)
+
+    return result
 
 # -----------------------
 # Pipeline
@@ -264,6 +310,12 @@ with st.sidebar:
     uploaded = st.file_uploader("Téléverser les données en format JSON", type=["json"])
     show_heatmap = st.toggle("Heatmap Type × Catégorie", True)
 
+    st.divider()
+    if st.button("♻️ Vider le cache de classification"):
+        CLASS_CACHE.clear()
+        _save_cache(CLASS_CACHE)
+        st.success("Cache vidé.")
+
 if not uploaded:
     st.info("➡️ Charge un fichier json récupéré depuis le API de D-Tools.")
     st.stop()
@@ -281,7 +333,7 @@ df = pd.concat([df_raw, df_cls], axis=1)
 # KPI & Graphiques
 # -----------------------
 total_tickets = len(df)
-completed_df = df[df["stateName"].str.lower() == "completed"]
+completed_df = df[df["stateName"].astype(str).str.lower() == "completed"]
 avg_cost = float(completed_df["price"].mean()) if not completed_df.empty else 0.0
 
 hors_ligne_pct = 100 * df["type_probleme"].eq("Hors ligne").mean() if total_tickets else 0.0
@@ -341,4 +393,3 @@ st.dataframe(df[cols], use_container_width=True, height=480)
 
 csv = df[cols].to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Télécharger CSV", csv, file_name="rapport_kpi.csv", mime="text/csv")
-
