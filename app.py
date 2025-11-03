@@ -285,12 +285,14 @@ total_tickets = len(df)
 avg_cost = float(df["price"].mean()) if total_tickets else 0.0
 hors_ligne_pct = 100 * df["type_probleme"].eq("Hors ligne").mean() if total_tickets else 0.0
 control4_pct = 100 * df["systeme"].eq("Control4").mean() if total_tickets else 0.0
+unifi_pct = 100 * df["systeme"].eq("Unifi").mean() if total_tickets else 0.0
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Tickets totaux", total_tickets)
 c2.metric("Hors ligne", f"{hors_ligne_pct:.1f}%")
 c3.metric("Control4 (explicite ou inféré)", f"{control4_pct:.1f}%")
-c4.metric("Coût moyen", f"{avg_cost:,.2f} $")
+c4.metric("Unifi (explicite ou inféré)", f"{unifi_pct:.1f}%")
+c5.metric("Coût moyen", f"{avg_cost:,.2f} $")
 
 st.divider()
 
