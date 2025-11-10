@@ -443,6 +443,13 @@ if not df.empty:
             title="Distribution des délais de clôture (jours)",
             labels={"closure_days": "Jours", "count": "Tickets"}
         )
+
+        fig_closure.update_traces(textposition='outside')
+        fig_closure.update_layout(
+            xaxis_tickangle=-45,
+            bargap=0.2,  # Espace entre les barres (20%)
+            showlegend=False
+        )
         st.plotly_chart(fig_closure, use_container_width=True)
 
     if show_heatmap:
