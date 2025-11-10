@@ -21,15 +21,14 @@ openai_api_key = st.secrets.get("OPENAI_API_KEY")
 client = openai.OpenAI(api_key=openai_api_key)
 
 # -----------------------
-# 📦 Cache persistant (Streamlit Cloud + fichier)
+# 📦 Cache persistant à 2 niveaux
 # -----------------------
 CACHE_PATH = Path("classification_cache.json")
+REPORT_CACHE_PATH = Path("report_cache.json")
 
 def _load_cache() -> dict:
-    # 1) session_state (le plus rapide pour les re-runs)
     if "CLASS_CACHE" in st.session_state and isinstance(st.session_state.CLASS_CACHE, dict):
         return st.session_state.CLASS_CACHE
-    # 2) fichier persistant (sur l'instance Streamlit Cloud tant que l'app ne redémarre pas)
     if CACHE_PATH.exists():
         try:
             with CACHE_PATH.open("r", encoding="utf-8") as f:
@@ -46,13 +45,36 @@ def _save_cache(cache: dict) -> None:
         with CACHE_PATH.open("w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
     except Exception:
-        # Si l’écriture échoue (read-only), on garde au moins session_state
         pass
 
+def _load_report_cache() -> dict:
+    if "REPORT_CACHE" in st.session_state:
+        return st.session_state.REPORT_CACHE
+    if REPORT_CACHE_PATH.exists():
+        try:
+            with REPORT_CACHE_PATH.open("r", encoding="utf-8") as f:
+                st.session_state.REPORT_CACHE = json.load(f)
+                return st.session_state.REPORT_CACHE
+        except Exception:
+            pass
+    st.session_state.REPORT_CACHE = {}
+    return st.session_state.REPORT_CACHE
+
+def _save_report_cache(cache: dict) -> None:
+    st.session_state.REPORT_CACHE = cache
+    try:
+        with REPORT_CACHE_PATH.open("w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _compute_file_hash(file_content: bytes) -> str:
+    return hashlib.sha256(file_content).hexdigest()
+
 CLASS_CACHE = _load_cache()
+REPORT_CACHE = _load_report_cache()
 
 def _cache_key_for_text(text: str) -> str:
-    # clé stable, indépendante de la longueur : SHA256 du texte nettoyé
     norm = (text or "").strip()
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
@@ -61,7 +83,7 @@ def _cache_key_for_text(text: str) -> str:
 # -----------------------
 TAXO_FR = {
     "type_probleme": [
-        "Hors ligne", "Pas de son", "Pas d’image", "Pas de contrôle",
+        "Hors ligne", "Pas de son", "Pas d'image", "Pas de contrôle",
         "Programmation", "Installation/Remplacement", "Mécanique/Batterie",
         "Logiciel/App", "Autre"
     ],
@@ -79,7 +101,7 @@ KEYWORDS_FR = {
     "type_probleme": {
         "offline": "Hors ligne", "hors ligne": "Hors ligne", "pas d'internet": "Hors ligne", "no internet": "Hors ligne",
         "pas de son": "Pas de son", "no sound": "Pas de son",
-        "pas d'image": "Pas d’image", "no image": "Pas d’image",
+        "pas d'image": "Pas d'image", "no image": "Pas d'image",
         "ne fonctionne pas": "Pas de contrôle", "ne marche pas": "Pas de contrôle", "contrôle": "Pas de contrôle",
         "programmation": "Programmation", "ajustement": "Programmation",
         "installer": "Installation/Remplacement", "installation": "Installation/Remplacement", "remplacer": "Installation/Remplacement",
@@ -121,11 +143,23 @@ def json_to_df(file_like):
     data = json.load(file_like)
     rows = data.get("serviceCalls", data) if isinstance(data, dict) else data
     df = pd.DataFrame(rows)
-    for col in ["number", "client", "issueReported", "price", "createdOn", "stateName"]:
+    
+    expected_cols = ["number", "client", "issueReported", "price", "createdOn", "stateName", "paymentBillingDate"]
+    for col in expected_cols:
         if col not in df.columns:
             df[col] = None
+    
     df["issue_text"] = df["issueReported"].apply(clean_html)
     df["createdOn"] = pd.to_datetime(df["createdOn"], errors="coerce")
+    df["paymentBillingDate"] = pd.to_datetime(df["paymentBillingDate"], errors="coerce")
+    
+    # Calcul du délai de clôture (en jours) - SEULEMENT pour les SC "Completed"
+    df["closure_days"] = None
+    completed_mask = df["stateName"].astype(str).str.lower() == "completed"
+    df.loc[completed_mask, "closure_days"] = (
+        df.loc[completed_mask, "paymentBillingDate"] - df.loc[completed_mask, "createdOn"]
+    ).dt.days
+    
     df.rename(columns={"number": "sc_number"}, inplace=True)
     month_period = df["createdOn"].dt.to_period("M")
     df["month_label"] = month_period.astype(str)
@@ -137,7 +171,6 @@ def json_to_df(file_like):
 # Classification (robuste)
 # -----------------------
 
-# 1) normalisation / snap
 def _snap(value: str, allowed: list[str]) -> str:
     v = (value or "").strip()
     if v in allowed:
@@ -148,7 +181,6 @@ def _snap(value: str, allowed: list[str]) -> str:
         return allowed[idx]
     return "Non spécifié" if "Non spécifié" in allowed else allowed[-1]
 
-# 2) détection explicite de marque
 _BRAND_REGEX = re.compile(
     r"\b(c4|control4|core[135]|ea-?[135]|unifi|usg|udm|uxg|sonos|hikvision|caseta|homeworks|lutron|somfy|qsc|apc|polycom|myq|helix|apple\s*tv|nas)\b",
     flags=re.IGNORECASE,
@@ -161,6 +193,7 @@ _BRAND_CANON = {
     "somfy": "Somfy", "qsc": "QSC", "apc": "APC", "polycom": "Polycom",
     "myq": "MyQ", "helix": "Helix", "apple tv": "Apple TV", "nas": "NAS",
 }
+
 def _explicit_brand(text: str) -> str | None:
     m = _BRAND_REGEX.search(text or "")
     if not m:
@@ -169,7 +202,6 @@ def _explicit_brand(text: str) -> str | None:
     key = "apple tv" if key.startswith("apple") else key
     return _BRAND_CANON.get(key)
 
-# 3) score mots-clés (booster)
 def _keyword_score(text: str, table: dict[str, dict[str, str]]) -> dict[str, dict[str, int]]:
     t = (text or "").lower()
     scores = {"type_probleme": {}, "categorie": {}, "systeme": {}}
@@ -179,7 +211,6 @@ def _keyword_score(text: str, table: dict[str, dict[str, str]]) -> dict[str, dic
                 scores[field][v] = scores[field].get(v, 0) + 1
     return scores
 
-# 4) prompt JSON strict
 def _prompt_json(text: str) -> str:
     return f"""
 Tu es un classificateur SAV. Réponds UNIQUEMENT par un JSON valide, sans texte autour.
@@ -208,16 +239,13 @@ def classify_service_call_gpt(issue_text: str) -> dict:
             "justification_systeme": "",
         }
 
-    # 🔒 Vérifie le cache
     key = _cache_key_for_text(text)
     if key in CLASS_CACHE:
         return CLASS_CACHE[key]
 
-    # a) Marque explicite
     explicit = _explicit_brand(text)
     explicit_system = explicit if explicit in TAXO_FR["systeme"] else None
 
-    # b) Appel GPT (JSON strict) + retry simple
     try:
         resp = client.chat.completions.create(
             model="gpt-4o",
@@ -242,11 +270,9 @@ def classify_service_call_gpt(issue_text: str) -> dict:
         )
         data = json.loads(resp.choices[0].message.content or "{}")
 
-    # c) Snap à la taxo
     tp = _snap(data.get("type_probleme", ""), TAXO_FR["type_probleme"])
     cat = _snap(data.get("categorie", ""), TAXO_FR["categorie"])
 
-    # d) Système + suggestion
     if explicit_system:
         sys_off = explicit_system
         sys_sugg = None
@@ -264,7 +290,6 @@ def classify_service_call_gpt(issue_text: str) -> dict:
             conf = float(data.get("confiance_systeme", 0.0) or 0.0)
             just = (data.get("justification_systeme") or "")[:120]
 
-    # e) Booster déterministe par mots-clés
     scores = _keyword_score(text, KEYWORDS_FR)
     if scores["type_probleme"]:
         tp = max(scores["type_probleme"], key=scores["type_probleme"].get)
@@ -287,20 +312,36 @@ def classify_service_call_gpt(issue_text: str) -> dict:
         "justification_systeme": just,
     }
 
-    # 📝 Sauvegarde dans le cache (session + fichier)
     CLASS_CACHE[key] = result
     _save_cache(CLASS_CACHE)
 
     return result
 
 # -----------------------
-# Pipeline
+# Pipeline avec cache de rapport
 # -----------------------
-def classify_all(df: pd.DataFrame) -> pd.DataFrame:
+def classify_all(df: pd.DataFrame, file_hash: str) -> pd.DataFrame:
+    if file_hash in REPORT_CACHE:
+        cached_data = REPORT_CACHE[file_hash]
+        st.success("✅ Rapport chargé depuis le cache (0 appel API)")
+        return pd.DataFrame(cached_data)
+    
     rows = []
-    for txt in df["issue_text"].fillna(""):
+    progress_bar = st.progress(0)
+    total = len(df)
+    
+    for idx, txt in enumerate(df["issue_text"].fillna("")):
         rows.append(classify_service_call_gpt(txt))
-    return pd.DataFrame(rows)
+        progress_bar.progress((idx + 1) / total)
+    
+    progress_bar.empty()
+    
+    result_df = pd.DataFrame(rows)
+    
+    REPORT_CACHE[file_hash] = result_df.to_dict('records')
+    _save_report_cache(REPORT_CACHE)
+    
+    return result_df
 
 # -----------------------
 # Interface Streamlit
@@ -311,22 +352,38 @@ with st.sidebar:
     show_heatmap = st.toggle("Heatmap Type × Catégorie", True)
 
     st.divider()
-    if st.button("♻️ Vider le cache de classification"):
-        CLASS_CACHE.clear()
-        _save_cache(CLASS_CACHE)
-        st.success("Cache vidé.")
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🗑️ Cache textes"):
+            CLASS_CACHE.clear()
+            _save_cache(CLASS_CACHE)
+            st.success("✓")
+    
+    with col_b:
+        if st.button("🗑️ Cache rapports"):
+            REPORT_CACHE.clear()
+            _save_report_cache(REPORT_CACHE)
+            st.success("✓")
+    
+    st.caption(f"📊 {len(CLASS_CACHE)} textes en cache")
+    st.caption(f"📁 {len(REPORT_CACHE)} rapports en cache")
 
 if not uploaded:
-    st.info("➡️ Charge un fichier json récupéré depuis le API de D-Tools.")
+    st.info("➡️ Charge un fichier JSON récupéré depuis l'API de D-Tools.")
     st.stop()
+
+file_content = uploaded.getvalue()
+file_hash = _compute_file_hash(file_content)
+uploaded.seek(0)
 
 df_raw = json_to_df(uploaded)
 if df_raw.empty:
     st.warning("Aucune donnée trouvée.")
     st.stop()
 
-st.info("⏳ Classification et génération du tableau de bord en cours...")
-df_cls = classify_all(df_raw)
+st.info("⏳ Traitement en cours...")
+df_cls = classify_all(df_raw, file_hash)
 df = pd.concat([df_raw, df_cls], axis=1)
 
 # -----------------------
@@ -336,23 +393,27 @@ total_tickets = len(df)
 completed_df = df[df["stateName"].astype(str).str.lower() == "completed"]
 avg_cost = float(completed_df["price"].mean()) if not completed_df.empty else 0.0
 
+completed_with_dates = completed_df[completed_df["closure_days"].notna() & (completed_df["closure_days"] >= 0)]
+avg_closure_days = float(completed_with_dates["closure_days"].mean()) if not completed_with_dates.empty else 0.0
+
 hors_ligne_pct = 100 * df["type_probleme"].eq("Hors ligne").mean() if total_tickets else 0.0
 control4_pct = 100 * df["systeme"].eq("Control4").mean() if total_tickets else 0.0
 unifi_pct = 100 * df["systeme"].eq("Unifi").mean() if total_tickets else 0.0
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Tickets totaux", total_tickets)
 c2.metric("Hors ligne", f"{hors_ligne_pct:.1f}%")
-c3.metric("Control4 (explicite ou déduit)", f"{control4_pct:.1f}%")
-c4.metric("Unifi (explicite ou déduit)", f"{unifi_pct:.1f}%")
-c5.metric("Coût moyen des SC complétés", f"{avg_cost:,.2f} $")
+c3.metric("Control4", f"{control4_pct:.1f}%")
+c4.metric("Unifi", f"{unifi_pct:.1f}%")
+c5.metric("Coût moyen", f"{avg_cost:,.0f} $")
+c6.metric("Délai clôture", f"{avg_closure_days:.1f}j")
 
 st.divider()
 
 if not df.empty:
     col1, col2 = st.columns(2)
     with col1:
-        fig1 = px.pie(df, names="systeme", title="Répartition des systèmes (officiels)")
+        fig1 = px.pie(df, names="systeme", title="Répartition des systèmes")
         st.plotly_chart(fig1, use_container_width=True)
 
     with col2:
@@ -366,11 +427,23 @@ if not df.empty:
         st.plotly_chart(fig2, use_container_width=True)
 
     st.divider()
-    # Tendance mensuelle
+    
     trend = df[df["month_label"] != "Sans date"].groupby("month_label").size().reset_index(name="tickets")
     trend = trend.sort_values("month_label")
-    fig_trend = px.line(trend, x="month_label", y="tickets", markers=True, title="Tendance mensuelle (tickets)")
+    fig_trend = px.line(trend, x="month_label", y="tickets", markers=True, title="Tendance mensuelle")
     st.plotly_chart(fig_trend, use_container_width=True)
+    
+    st.divider()
+    closure_data = df[df["closure_days"].notna() & (df["closure_days"] >= 0)]
+    if not closure_data.empty:
+        fig_closure = px.histogram(
+            closure_data, 
+            x="closure_days", 
+            nbins=20,
+            title="Distribution des délais de clôture (jours)",
+            labels={"closure_days": "Jours", "count": "Tickets"}
+        )
+        st.plotly_chart(fig_closure, use_container_width=True)
 
     if show_heatmap:
         st.divider()
@@ -381,7 +454,7 @@ if not df.empty:
 # Table + export
 # -----------------------
 cols = [
-    "sc_number", "client", "createdOn", "price", "issue_text",
+    "sc_number", "client", "createdOn", "paymentBillingDate", "closure_days", "price", "issue_text",
     "type_probleme", "categorie", "systeme", "systeme_suggere",
     "confiance_systeme", "justification_systeme"
 ]
