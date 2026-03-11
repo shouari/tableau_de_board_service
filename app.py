@@ -534,9 +534,7 @@ def build_exec_summary(
     lines = [
         "### Résumé exécutif",
         f"- **{total_tickets:,} tickets** analysés pour un **revenu total de {total_revenue:,.0f} $**.",
-        f"- Les appels **gratuits représentent {free_rate:.1f}%** du volume sur le périmètre gratuité retenu.",
-        f"- Le **coût caché estimé** du SAV gratuit est de **{free_hidden_cost:,.0f} $**, soit **{hidden_cost_vs_revenue:.1f}% du revenu**.",
-        f"- Le problème le plus fréquent est **{top_problem_name}** avec **{top_problem_count:,} tickets**.",
+        f"- Le **coût caché estimé** du SAV gratuit est de **{free_hidden_cost:,.0f} $**, soit **{hidden_cost_vs_revenue:.1f}% du revenu généré par les appels de services facturés**.",
         f"- Le système le plus présent est **{top_system_name}** avec **{top_system_count:,} tickets**.",
         f"- Le client le plus demandeur est **{top_client_name}** avec **{top_client_count:,} tickets**.",
         f"- Le **cycle moyen** des tickets est de **{avg_closure_days:.1f} jours**.",
