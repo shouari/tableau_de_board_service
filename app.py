@@ -6,7 +6,6 @@ from pathlib import Path
 from io import BytesIO
 from datetime import datetime
 from html import escape
-import time
 
 import pandas as pd
 import streamlit as st
@@ -20,7 +19,7 @@ import openai
 # =========================================================
 st.set_page_config(page_title="SAV KPI Dashboard V5.3", page_icon="📊", layout="wide")
 st.title("📊 Service Calls — KPI Dashboard V5.3")
-st.caption("Rapport de l'activité service")
+st.caption("Vue période + vue mois sélectionné, comparaisons avancées, anomalies, drill-down")
 
 openai_api_key = st.secrets.get("OPENAI_API_KEY")
 client = openai.OpenAI(api_key=openai_api_key) if openai_api_key else None
@@ -40,6 +39,52 @@ DEFAULT_INTERNAL_CLIENTS = [
     "RMA C&S",
     "Reserver Services",
 ]
+
+
+# =========================================================
+# HELPERS STYLE PLOTLY
+# =========================================================
+def style_bar_chart(fig, money=False):
+    if money:
+        fig.update_traces(
+            texttemplate="%{y:,.0f}$",
+            textposition="outside",
+            cliponaxis=False
+        )
+    else:
+        fig.update_traces(
+            texttemplate="%{y}",
+            textposition="outside",
+            cliponaxis=False
+        )
+
+    fig.update_layout(
+        xaxis_title=None,
+        yaxis_title=None,
+        uniformtext_minsize=8,
+        uniformtext_mode="hide"
+    )
+    return fig
+
+
+def style_line_chart(fig):
+    fig.update_layout(
+        xaxis_title=None,
+        yaxis_title=None,
+        legend_title_text=""
+    )
+    return fig
+
+
+def style_pie_chart(fig):
+    fig.update_layout(legend_title_text="")
+    fig.update_traces(textinfo="percent+label")
+    return fig
+
+
+def rename_traces(fig, mapping: dict):
+    fig.for_each_trace(lambda t: t.update(name=mapping.get(t.name, t.name)))
+    return fig
 
 
 # =========================================================
@@ -395,10 +440,6 @@ def classify_service_call_gpt(issue_text: str) -> dict:
 
 def classify_all(df: pd.DataFrame, file_hash: str) -> pd.DataFrame:
     if file_hash in REPORT_CACHE:
-        status_box = st.empty()
-        status_box.success("✅ Rapport chargé depuis le cache")
-        time.sleep(5)
-        status_box.empty()
         return pd.DataFrame(REPORT_CACHE[file_hash])
 
     rows = []
@@ -522,26 +563,9 @@ def enriched_csv_to_df(file_like):
     return df
 
 
-def classify_free_risk(row):
-    if row["sc_count"] < MIN_SC_FOR_ALERT:
-        return "Volume faible"
-    if row["free_rate_pct"] >= FREE_RATE_ALERT_HIGH:
-        return "Critique"
-    if row["free_rate_pct"] >= FREE_RATE_ALERT_MEDIUM:
-        return "À surveiller"
-    return "Normal"
-
-
-def fmt_delta_pct(value):
-    if value is None or pd.isna(value):
-        return "n/a"
-    return f"{value:+.1f}%"
-
-
-def safe_pct_change(current, previous):
-    if previous in [0, None] or pd.isna(previous):
-        return None
-    return (current - previous) / previous * 100
+def months_covered_from_periods(period_series):
+    clean = period_series.dropna().sort_values().unique()
+    return len(clean)
 
 
 def build_monthly_overall(df_scope):
@@ -623,6 +647,18 @@ def merge_monthly_tables(overall, gratuity):
     return monthly
 
 
+def safe_pct_change(current, previous):
+    if previous in [0, None] or pd.isna(previous):
+        return None
+    return (current - previous) / previous * 100
+
+
+def fmt_delta_pct(value):
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{value:+.1f}%"
+
+
 def compare_selected_period(monthly_df, idx, metric, mode):
     current = monthly_df.loc[idx, metric]
 
@@ -680,6 +716,22 @@ def compare_selected_period(monthly_df, idx, metric, mode):
     return current, None
 
 
+def build_metric_display(current, delta, metric):
+    if current is None or pd.isna(current):
+        return "n/a", "n/a"
+
+    if metric in ["revenue", "estimated_hidden_cost", "avg_price"]:
+        cur = f"{current:,.0f} $"
+    elif metric in ["free_rate_pct", "hors_ligne_pct", "control4_pct", "unifi_pct", "cancel_rate_pct"]:
+        cur = f"{current:.1f}%"
+    elif metric == "avg_closure_days":
+        cur = f"{current:.1f} j"
+    else:
+        cur = f"{current:,.0f}"
+
+    return cur, fmt_delta_pct(delta)
+
+
 def compare_last_12_vs_prev_12(monthly_df, metric):
     if len(monthly_df) < 24:
         return None
@@ -734,27 +786,6 @@ def detect_monthly_anomalies(monthly_df):
         anomalies["sev_rank"] = anomalies["severity"].map(severity_order)
         anomalies = anomalies.sort_values(["sev_rank", "delta_pct"], ascending=[False, False]).drop(columns=["sev_rank"])
     return anomalies
-
-
-def build_metric_display(current, delta, metric):
-    if current is None or pd.isna(current):
-        return "n/a", "n/a"
-
-    if metric in ["revenue", "estimated_hidden_cost", "avg_price"]:
-        cur = f"{current:,.0f} $"
-    elif metric in ["free_rate_pct", "hors_ligne_pct", "control4_pct", "unifi_pct", "cancel_rate_pct"]:
-        cur = f"{current:.1f}%"
-    elif metric == "avg_closure_days":
-        cur = f"{current:.1f} j"
-    else:
-        cur = f"{current:,.0f}"
-
-    return cur, fmt_delta_pct(delta)
-
-
-def months_covered_from_periods(period_series):
-    clean = period_series.dropna().sort_values().unique()
-    return len(clean)
 
 
 def markdown_summary_to_html(summary_markdown: str) -> str:
@@ -1002,7 +1033,7 @@ with st.sidebar:
                 TECH_MAP = converted
             else:
                 TECH_MAP = {int(k): v for k, v in TECH_MAP.items()}
-            st.success("Mapping techniciens chargé")
+            st.success("✅ Mapping techniciens chargé")
         except Exception as e:
             st.error(f"Erreur lecture mapping techniciens : {e}")
 
@@ -1083,11 +1114,12 @@ if input_mode == "JSON brut (classification possible)":
 
     status_box = st.empty()
     status_box.info("⏳ Enrichissement en cours...")
+
     df_cls = classify_all(df_raw, file_hash)
     df = pd.concat([df_raw.reset_index(drop=True), df_cls.reset_index(drop=True)], axis=1)
+
+    status_box.success("✅ Chargement et enrichissement terminés")
     data_origin = "json_brut"
-    status_box.success("✅ Enrichissement terminé") 
-    status_box.empty()
 
 else:
     if not enriched_file:
@@ -1099,7 +1131,7 @@ else:
         st.warning("Aucune donnée dans le CSV enrichi.")
         st.stop()
 
-    st.success("✅ CSV enrichi chargé — aucun appel GPT")
+    st.success("✅ CSV enrichi chargé")
     data_origin = "csv_enrichi"
 
 
@@ -1238,7 +1270,14 @@ client_summary = (
 client_summary["free_rate_pct"] = (client_summary["free_sc"] / client_summary["sc_count"] * 100).round(1)
 client_summary["estimated_hidden_cost"] = (client_summary["free_sc"] * estimated_avg_free_hours * hourly_rate).round(2)
 client_summary["is_internal_client"] = client_summary["client"].isin(internal_clients)
-client_summary["free_risk_level"] = client_summary.apply(classify_free_risk, axis=1)
+client_summary["free_risk_level"] = client_summary.apply(
+    lambda row: "Volume faible" if row["sc_count"] < MIN_SC_FOR_ALERT else (
+        "Critique" if row["free_rate_pct"] >= FREE_RATE_ALERT_HIGH else (
+            "À surveiller" if row["free_rate_pct"] >= FREE_RATE_ALERT_MEDIUM else "Normal"
+        )
+    ),
+    axis=1
+)
 client_summary = client_summary.sort_values(["sc_count", "revenue"], ascending=[False, False])
 
 client_summary_for_risk = client_summary.copy()
@@ -1276,7 +1315,7 @@ reason_summary = (
     .reset_index(name="count")
 )
 if not reason_summary.empty:
-    reason_summary["share_pct"] = (reason_summary["count"] / reason_summary["count"].sum() * 100).round(1)
+    reason_summary["part_pct"] = (reason_summary["count"] / reason_summary["count"].sum() * 100).round(1)
 
 monthly_overall = build_monthly_overall(df_f)
 monthly_gratuity = build_monthly_gratuity(df_gratuity_scope)
@@ -1338,15 +1377,19 @@ last_12_vs_prev_12_revenue = compare_last_12_vs_prev_12(monthly_metrics, "revenu
 # =========================================================
 summary_markdown = f"""
 ### Résumé exécutif
-
-- **{total_tickets:,} tickets** analysés pour un **revenu total de {total_revenue:,.0f} $** pour la période **{period_label}** (**{months_covered} mois** couverts) .
-- Le **coût caché estimé** du SAV gratuit est de **{free_hidden_cost:,.0f} $**, soit **{hidden_cost_vs_revenue:.1f}% du revenu service facturé** pour la période **{period_label}**  .
+- **Période analysée : {period_label}** (**{months_covered} mois** couverts).
+- **{total_tickets:,} tickets** analysés pour un **revenu total de {total_revenue:,.0f} $**.
+- Les appels **gratuits représentent {free_rate:.1f}%** du volume sur le périmètre gratuité retenu.
+- Le **coût caché estimé** du SAV gratuit est de **{free_hidden_cost:,.0f} $**, soit **{hidden_cost_vs_revenue:.1f}% du revenu service analysé**.
+- Le problème le plus fréquent est **{top_problem_name}** avec **{top_problem_count:,} tickets**.
+- Le système le plus présent est **{top_system_name}** avec **{top_system_count:,} tickets**.
 - Le client le plus demandeur est **{top_client_name}** avec **{top_client_count:,} tickets**.
 - Le **cycle moyen** des tickets est de **{avg_closure_days:.1f} jours**.
 - Les tickets **hors ligne** représentent **{hors_ligne_pct:.1f}%** du volume.
-- Évolution récente : **nombre de tickets  {fmt_delta_pct(latest_mom_sc)}** et **revenu {fmt_delta_pct(latest_mom_revenue)}** vs mois précédent.
-- Vs même mois l’an dernier : **nombre de tickets  {fmt_delta_pct(latest_yoy_sc)}** et **revenu {fmt_delta_pct(latest_yoy_revenue)}**.
-- Les **clients internes sont {'exclus' if exclude_internal_from_gratuity else 'inclus'}** des gratuités et du calcul du coût caché.
+- Évolution récente : **SC {fmt_delta_pct(latest_mom_sc)}** et **revenu {fmt_delta_pct(latest_mom_revenue)}** vs mois précédent.
+- Vs même mois l’an dernier : **SC {fmt_delta_pct(latest_yoy_sc)}** et **revenu {fmt_delta_pct(latest_yoy_revenue)}**.
+- Comparatif **12 mois glissants vs 12 mois précédents** : **SC {fmt_delta_pct(last_12_vs_prev_12_sc)}** et **revenu {fmt_delta_pct(last_12_vs_prev_12_revenue)}**.
+- Les **clients internes sont {'exclus' if exclude_internal_from_gratuity else 'inclus'}** du périmètre gratuité et du calcul du coût caché.
 """.strip()
 
 if show_exec_summary:
@@ -1357,15 +1400,14 @@ if show_exec_summary:
 # =========================================================
 st.subheader("🗓️ Contexte de période")
 
-pc1, pc2= st.columns(2)
-pc1.metric("Période selectionnée", period_label)
+pc1, pc2 = st.columns(2)
+pc1.metric("Période analysée", period_label)
 pc2.metric("Mois couverts", f"{months_covered}")
-
 
 # =========================================================
 # BLOC 1 : VUE PÉRIODE
 # =========================================================
-st.subheader("📌 Vue sur toute la période")
+st.subheader("📌 Bloc 1 — Vue période analysée")
 st.caption("Indicateurs cumulés sur la période filtrée.")
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -1387,7 +1429,7 @@ c12.metric("Clients internes exclus", "Oui" if exclude_internal_from_gratuity el
 # =========================================================
 # BLOC 2 : VUE MOIS SÉLECTIONNÉ
 # =========================================================
-st.subheader("📅 Vue sur le mois ")
+st.subheader("📅 Bloc 2 — Vue mois sélectionné")
 st.caption("Indicateurs du mois choisi, avec comparaison.")
 
 selected_month_view = None
@@ -1480,14 +1522,24 @@ fig_roll_hidden = None
 
 if not monthly_metrics.empty:
     r1, r2 = st.columns(2)
+
     fig_roll_sc = px.line(
         monthly_metrics,
         x="year_month_str",
         y=["sc_count", "sc_count_roll12"],
-        title="SC mensuels vs tendance 12 mois",
+        title="Services mensuels vs tendance 12 mois",
+        labels={
+            "year_month_str": "Mois",
+            "value": "Nombre de services",
+            "variable": "Série",
+        },
         markers=True
     )
-    fig_roll_sc.update_layout(legend_title_text="")
+    fig_roll_sc = rename_traces(fig_roll_sc, {
+        "sc_count": "Services mensuels",
+        "sc_count_roll12": "Tendance 12 mois",
+    })
+    fig_roll_sc = style_line_chart(fig_roll_sc)
     r1.plotly_chart(fig_roll_sc, use_container_width=True)
 
     fig_roll_rev = px.line(
@@ -1495,21 +1547,40 @@ if not monthly_metrics.empty:
         x="year_month_str",
         y=["revenue", "revenue_roll12"],
         title="Revenu mensuel vs tendance 12 mois",
+        labels={
+            "year_month_str": "Mois",
+            "value": "Revenu ($)",
+            "variable": "Série",
+        },
         markers=True
     )
-    fig_roll_rev.update_layout(legend_title_text="")
+    fig_roll_rev = rename_traces(fig_roll_rev, {
+        "revenue": "Revenu mensuel",
+        "revenue_roll12": "Tendance 12 mois",
+    })
+    fig_roll_rev = style_line_chart(fig_roll_rev)
     r2.plotly_chart(fig_roll_rev, use_container_width=True)
 
     r3, r4 = st.columns(2)
+
     if "free_rate_pct" in monthly_metrics.columns:
         fig_roll_free = px.line(
             monthly_metrics,
             x="year_month_str",
             y=["free_rate_pct", "free_rate_pct_roll12"],
-            title="Taux gratuit vs tendance 12 mois",
+            title="Taux de gratuité vs tendance 12 mois",
+            labels={
+                "year_month_str": "Mois",
+                "value": "Taux de gratuité (%)",
+                "variable": "Série",
+            },
             markers=True
         )
-        fig_roll_free.update_layout(legend_title_text="")
+        fig_roll_free = rename_traces(fig_roll_free, {
+            "free_rate_pct": "Taux gratuit mensuel",
+            "free_rate_pct_roll12": "Tendance 12 mois",
+        })
+        fig_roll_free = style_line_chart(fig_roll_free)
         r3.plotly_chart(fig_roll_free, use_container_width=True)
 
     if "estimated_hidden_cost" in monthly_metrics.columns:
@@ -1518,45 +1589,64 @@ if not monthly_metrics.empty:
             x="year_month_str",
             y=["estimated_hidden_cost", "estimated_hidden_cost_roll12"],
             title="Coût caché mensuel vs tendance 12 mois",
+            labels={
+                "year_month_str": "Mois",
+                "value": "Coût caché ($)",
+                "variable": "Série",
+            },
             markers=True
         )
-        fig_roll_hidden.update_layout(legend_title_text="")
+        fig_roll_hidden = rename_traces(fig_roll_hidden, {
+            "estimated_hidden_cost": "Coût caché mensuel",
+            "estimated_hidden_cost_roll12": "Tendance 12 mois",
+        })
+        fig_roll_hidden = style_line_chart(fig_roll_hidden)
         r4.plotly_chart(fig_roll_hidden, use_container_width=True)
 
 # =========================================================
 # ANOMALIES
 # =========================================================
-# st.divider()
-# st.subheader("⚠️ Détection automatique des anomalies mensuelles")
+st.divider()
+st.subheader("⚠️ Détection automatique des anomalies mensuelles")
 
-# if anomalies_df.empty:
-#     st.success("Aucune anomalie mensuelle significative détectée selon les seuils actuels.")
-# else:
-#     st.dataframe(anomalies_df.head(20), use_container_width=True, height=280)
+if anomalies_df.empty:
+    st.success("Aucune anomalie mensuelle significative détectée selon les seuils actuels.")
+    fig_anomaly = None
+else:
+    st.dataframe(anomalies_df.head(20), use_container_width=True, height=280)
 
-#     anomaly_counts = (
-#         anomalies_df["metric"]
-#         .value_counts()
-#         .rename_axis("metric")
-#         .reset_index(name="count")
-#     )
-#     fig_anomaly = px.bar(
-#         anomaly_counts,
-#         x="metric",
-#         y="count",
-#         title="Nombre d'anomalies détectées par métrique",
-#         text="count"
-#     )
-#     st.plotly_chart(fig_anomaly, use_container_width=True)
+    anomaly_counts = (
+        anomalies_df["metric"]
+        .value_counts()
+        .rename_axis("metric")
+        .reset_index(name="count")
+    )
+    fig_anomaly = px.bar(
+        anomaly_counts,
+        x="metric",
+        y="count",
+        title="Nombre d'anomalies détectées par métrique",
+        labels={
+            "metric": "Métrique",
+            "count": "Nombre d'anomalies"
+        },
+        text="count"
+    )
+    fig_anomaly = style_bar_chart(fig_anomaly, money=False)
+    st.plotly_chart(fig_anomaly, use_container_width=True)
 
 # =========================================================
 # CHARTS
 # =========================================================
-
 st.divider()
-st.subheader("📈 Le service en quelques graphes")
 
-fig_systems = px.pie(df_f, names="systeme", title="Répartition des systèmes")
+fig_systems = px.pie(
+    df_f,
+    names="systeme",
+    title="Répartition des systèmes",
+    labels={"systeme": "Système"}
+)
+fig_systems = style_pie_chart(fig_systems)
 
 cat_count = (
     df_f["categorie"]
@@ -1564,12 +1654,72 @@ cat_count = (
     .rename_axis("categorie")
     .reset_index(name="count")
 )
-fig_categories = px.bar(cat_count, x="categorie", y="count", title="Répartition par catégorie", text="count")
+fig_categories = px.bar(
+    cat_count,
+    x="categorie",
+    y="count",
+    title="Répartition par catégorie",
+    labels={
+        "categorie": "Catégorie",
+        "count": "Nombre de services"
+    },
+    text="count"
+)
+fig_categories = style_bar_chart(fig_categories, money=False)
 
-fig_monthly_sc = px.line(monthly_sc, x="month_label", y="tickets", markers=True, title="SC par mois")
-fig_monthly_revenue = px.bar(monthly_revenue, x="month_label", y="revenue", title="Revenu par mois", text_auto=".2s")
-fig_top_problems = px.bar(problem_summary.head(10), x="type_probleme", y="sc_count", title="Top problèmes", text="sc_count")
-fig_top_clients = px.bar(client_summary.head(10), x="client", y="sc_count", title="Top clients — nombre de SC", text="sc_count")
+fig_monthly_sc = px.line(
+    monthly_sc,
+    x="month_label",
+    y="tickets",
+    title="Services par mois",
+    labels={
+        "month_label": "Mois",
+        "tickets": "Nombre de services"
+    },
+    markers=True
+)
+fig_monthly_sc = rename_traces(fig_monthly_sc, {
+    "tickets": "Services"
+})
+fig_monthly_sc = style_line_chart(fig_monthly_sc)
+
+fig_monthly_revenue = px.bar(
+    monthly_revenue,
+    x="month_label",
+    y="revenue",
+    title="Revenu par mois",
+    labels={
+        "month_label": "Mois",
+        "revenue": "Revenu ($)"
+    }
+)
+fig_monthly_revenue = style_bar_chart(fig_monthly_revenue, money=True)
+
+fig_top_problems = px.bar(
+    problem_summary.head(10),
+    x="type_probleme",
+    y="sc_count",
+    title="Top problèmes",
+    labels={
+        "type_probleme": "Type de problème",
+        "sc_count": "Nombre de services"
+    },
+    text="sc_count"
+)
+fig_top_problems = style_bar_chart(fig_top_problems, money=False)
+
+fig_top_clients = px.bar(
+    client_summary.head(10),
+    x="client",
+    y="sc_count",
+    title="Top clients — nombre de services",
+    labels={
+        "client": "Client",
+        "sc_count": "Nombre de services"
+    },
+    text="sc_count"
+)
+fig_top_clients = style_bar_chart(fig_top_clients, money=False)
 fig_top_clients.update_layout(xaxis_tickangle=-35)
 
 row1_col1, row1_col2 = st.columns(2)
@@ -1597,8 +1747,15 @@ row4_col1, row4_col2 = st.columns(2)
 with row4_col1:
     fig_clients_rev = px.bar(
         client_summary.sort_values("revenue", ascending=False).head(10),
-        x="client", y="revenue", title="Top clients — revenu", text_auto=".2s"
+        x="client",
+        y="revenue",
+        title="Top clients — revenu",
+        labels={
+            "client": "Client",
+            "revenue": "Revenu ($)"
+        }
     )
+    fig_clients_rev = style_bar_chart(fig_clients_rev, money=True)
     fig_clients_rev.update_layout(xaxis_tickangle=-35)
     st.plotly_chart(fig_clients_rev, use_container_width=True)
 
@@ -1606,9 +1763,16 @@ with row4_col2:
     if not tech_summary.empty:
         fig_tech = px.bar(
             tech_summary.head(10),
-            x="technicien", y="sc_count",
-            title="Techniciens — nombre d'interventions", text="sc_count"
+            x="technicien",
+            y="sc_count",
+            title="Techniciens — nombre d'interventions",
+            labels={
+                "technicien": "Technicien",
+                "sc_count": "Nombre d'interventions"
+            },
+            text="sc_count"
         )
+        fig_tech = style_bar_chart(fig_tech, money=False)
         st.plotly_chart(fig_tech, use_container_width=True)
     else:
         st.info("Aucune donnée technicien exploitable.")
@@ -1620,16 +1784,36 @@ with row5_col1:
     if not tech_summary.empty:
         fig_tech_rev = px.bar(
             tech_summary.sort_values("revenue", ascending=False).head(10),
-            x="technicien", y="revenue",
-            title="Techniciens — revenu généré", text_auto=".2s"
+            x="technicien",
+            y="revenue",
+            title="Techniciens — revenu généré",
+            labels={
+                "technicien": "Technicien",
+                "revenue": "Revenu ($)"
+            }
         )
+        fig_tech_rev = style_bar_chart(fig_tech_rev, money=True)
         st.plotly_chart(fig_tech_rev, use_container_width=True)
     else:
         st.info("Aucune donnée technicien exploitable.")
         fig_tech_rev = None
 
 with row5_col2:
-    fig_free = px.line(monthly_free, x="month_label", y="free_rate_pct", markers=True, title="Taux gratuit mensuel (%)")
+    fig_free = px.line(
+        monthly_free,
+        x="month_label",
+        y="free_rate_pct",
+        title="Taux gratuit mensuel",
+        labels={
+            "month_label": "Mois",
+            "free_rate_pct": "Taux gratuit (%)"
+        },
+        markers=True
+    )
+    fig_free = rename_traces(fig_free, {
+        "free_rate_pct": "Taux gratuit"
+    })
+    fig_free = style_line_chart(fig_free)
     st.plotly_chart(fig_free, use_container_width=True)
 
 # =========================================================
@@ -1657,10 +1841,16 @@ if not cost_by_reason.empty:
         cost_by_reason,
         x="raison",
         y="estimated_hidden_cost",
-        hover_data=["count", "share_pct"],
+        hover_data=["count", "part_pct"],
         title="Répartition estimée du coût caché des SC gratuits par raison",
-        text_auto=".2s",
+        labels={
+            "raison": "Raison",
+            "estimated_hidden_cost": "Coût caché estimé ($)",
+            "count": "Nombre de SC",
+            "part_pct": "Part (%)"
+        }
     )
+    fig_cost_reason = style_bar_chart(fig_cost_reason, money=True)
     st.plotly_chart(fig_cost_reason, use_container_width=True)
 else:
     fig_cost_reason = None
@@ -1671,10 +1861,11 @@ else:
 st.divider()
 st.subheader("🚨 Détection automatique des clients à forte gratuité")
 
-risk_k1, risk_k2, risk_k3= st.columns(3)
+risk_k1, risk_k2, risk_k3, risk_k4 = st.columns(4)
 risk_k1.metric("Clients à risque", f"{free_risk_count}")
 risk_k2.metric("Plus fort taux gratuité", f"{top_free_risk_rate:.1f}%" if free_risk_count > 0 else "0.0%")
 risk_k3.metric("Client le plus exposé", f"{top_free_risk_client}" if free_risk_count > 0 else "N/A")
+risk_k4.metric("Clients internes exclus", "Oui" if exclude_internal_from_gratuity else "Non")
 
 st.caption(
     f"Détection basée sur au moins {MIN_SC_FOR_ALERT} SC par client et un taux de gratuité ≥ {FREE_RATE_ALERT_MEDIUM:.0f}%."
@@ -1688,10 +1879,21 @@ if not free_risk_clients.empty:
         y="free_rate_pct",
         color="free_risk_level",
         hover_data=["sc_count", "free_sc", "revenue", "estimated_hidden_cost", "is_internal_client"],
-        title="Clients à forte gratuité — taux de gratuité (%)",
+        title="Clients à forte gratuité — taux de gratuité",
+        labels={
+            "client": "Client",
+            "free_rate_pct": "Taux de gratuité (%)",
+            "free_risk_level": "Niveau de risque",
+            "sc_count": "Nombre de SC",
+            "free_sc": "SC gratuits",
+            "revenue": "Revenu",
+            "estimated_hidden_cost": "Coût caché estimé",
+            "is_internal_client": "Client interne"
+        },
         text="free_rate_pct"
     )
-    fig_risk_clients.update_layout(xaxis_tickangle=-35)
+    fig_risk_clients.update_traces(texttemplate="%{y:.1f}%", textposition="outside", cliponaxis=False)
+    fig_risk_clients.update_layout(xaxis_title=None, yaxis_title=None, xaxis_tickangle=-35, legend_title_text="")
     st.plotly_chart(fig_risk_clients, use_container_width=True)
 
     st.dataframe(
@@ -1717,8 +1919,11 @@ if not closure_valid_df.empty:
         closure_valid_df,
         x="closure_days",
         nbins=20,
-        title="Distribution du cycle ticket (jours)",
-        labels={"closure_days": "Jours", "count": "Tickets"}
+        title="Distribution du cycle ticket",
+        labels={
+            "closure_days": "Jours",
+            "count": "Nombre de tickets"
+        }
     )
     fig_closure.update_layout(xaxis_tickangle=-45, bargap=0.2, showlegend=False)
     st.plotly_chart(fig_closure, use_container_width=True)
@@ -1727,7 +1932,12 @@ else:
 
 if show_heatmap:
     cross = pd.crosstab(df_f["type_probleme"], df_f["categorie"])
-    fig_heatmap = px.imshow(cross, text_auto=True, title="Heatmap — Type × Catégorie")
+    fig_heatmap = px.imshow(
+        cross,
+        text_auto=True,
+        title="Heatmap — Type de problème × Catégorie",
+        labels=dict(x="Catégorie", y="Type de problème", color="Nombre")
+    )
     st.plotly_chart(fig_heatmap, use_container_width=True)
 else:
     fig_heatmap = None
@@ -1748,9 +1958,10 @@ if show_client_bubble:
             color="free_rate_pct",
             title="Clients — volume SAV vs revenu vs gratuité",
             labels={
-                "sc_count": "Nombre de SC",
-                "revenue": "Revenu total",
+                "sc_count": "Nombre de services",
+                "revenue": "Revenu total ($)",
                 "free_rate_pct": "Taux gratuit (%)",
+                "free_sc": "SC gratuits"
             }
         )
         st.plotly_chart(fig_bubble, use_container_width=True)
@@ -1989,12 +2200,12 @@ excel_bytes = to_excel_bytes({
 figures_for_html = [
     ("Répartition des systèmes", fig_systems),
     ("Répartition par catégorie", fig_categories),
-    ("SC par mois", fig_monthly_sc),
+    ("Services par mois", fig_monthly_sc),
     ("Revenu par mois", fig_monthly_revenue),
-    ("SC vs tendance 12 mois", fig_roll_sc),
+    ("Services vs tendance 12 mois", fig_roll_sc),
     ("Revenu vs tendance 12 mois", fig_roll_rev),
     ("Top problèmes", fig_top_problems),
-    ("Top clients — nombre de SC", fig_top_clients),
+    ("Top clients — nombre de services", fig_top_clients),
     ("Clients à forte gratuité", fig_risk_clients),
     ("Coût caché par raison", fig_cost_reason),
 ]
